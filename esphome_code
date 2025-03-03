@@ -1,0 +1,127 @@
+substitutions: #substitute your own values in this section
+  device_name: "esp32-bigrigio-s62"
+#  static_ip: 192.168.1.101
+  gateway: 192.168.1.254
+  subnet: 255.255.255.0
+  dns1: 192.168.1.241
+
+#---------------------------------------------------------------------------------------------
+
+esphome:
+  name: '${device_name}'
+  friendly_name: '${device_name}'
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Rome
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+  - platform: homeassistant
+    id: esptime
+
+# Enable logging
+debug:
+  update_interval: 5s
+
+text_sensor:
+  - platform: debug
+    device:
+      name: "Device Info"
+    reset_reason:
+      name: "Reset Reason"
+
+logger:
+  level: DEBUG #VERY_VERBOSE
+
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+ota:
+  - platform: esphome
+    password: "xxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  use_address: ${device_name}.montefato.local
+    
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: '${device_name}'
+    password: "xxxxxxxxxxxx"
+
+
+# Variabili globali
+globals:
+  - id: pulse_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: last_pulse_time
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: has_valid_number
+    type: bool
+    restore_value: no
+    initial_value: 'false'  # All'avvio, nessun numero valido
+
+# Sensore per S1 (conta gli impulsi)
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO13
+      mode: INPUT_PULLUP
+      inverted: true  # S1: HIGH (aperto) = "off", LOW (chiuso) = "on"
+    name: "Impulso del Disco Combinatore"
+    filters:
+      - delayed_on: 20ms  # Debounce per impulsi
+      - delayed_off: 20ms
+    on_press:  # Ogni volta che S1 si chiude (impulso)
+      then:
+        - logger.log: "Impulso rilevato"
+        - lambda: |-
+            id(pulse_count) = id(pulse_count) + 1;  // Incrementa il conteggio
+            id(last_pulse_time) = millis();  // Aggiorna il tempo dell'ultimo impulso
+            ESP_LOGD("custom", "Impulsi totali: %d", id(pulse_count));
+
+# Sensore per il numero finale (solo numero intero, con valore iniziale non definito)
+sensor:
+  - platform: template
+    name: "Numero Composto"
+    id: dialed_number
+    accuracy_decimals: 0  # Nessun decimale
+    update_interval: 0.5s  # Controlla frequentemente
+    lambda: |-
+      // Se sono passati 2 secondi dall'ultimo impulso, considera la rotazione finita
+      if (id(pulse_count) > 0 && (millis() - id(last_pulse_time) > 2000)) {
+        int final_count = id(pulse_count);
+        if (final_count == 10) final_count = 0;  // Converti 10 impulsi in "0"
+        
+        // Resetta il sensore a NAN (unavailable) prima di pubblicare il nuovo valore
+        id(dialed_number).publish_state(NAN);
+        
+        // Pubblica il nuovo valore come intero
+        id(pulse_count) = 0;  // Resetta il conteggio
+        id(last_pulse_time) = 0;
+        id(has_valid_number) = true;  // Segnala che ora abbiamo un numero valido
+        ESP_LOGD("custom", "Nuovo numero composto: %d", final_count);
+        return final_count;  // Restituisci il numero finale come intero
+      }
+      // Se non abbiamo un numero valido, restituisci NAN (non disponibile)
+      if (!id(has_valid_number)) {
+        return NAN;  // All'avvio, non pubblica un valore valido
+      }
+      return (int)id(dialed_number).state;  // Mantieni lo stato attuale come intero
